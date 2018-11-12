@@ -266,7 +266,7 @@ void *TcpClient::processThread(void *tcp_client_)
 
 	printf("before client recv\n");
 	while (pro_thd_running) {
-		rt = socket_recv(client_sk, (char *)buf, expect_len);
+		rt = socket_recv_timeout(client_sk, (char *)buf, expect_len, 10);
 		if (rt <= 0 || errno == ECONNRESET || rt != expect_len) {
 			goto SOCKET_ERR;
 		}

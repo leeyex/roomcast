@@ -31,9 +31,9 @@ int initTcpSocket()
 	} */
 
 //	int keepidle = 3600 * 24 * 7;
-	int keepidle = 10;
-	int keepcnt = 10;
-	int keepintvl = 10;
+	int keepidle = 5;
+	int keepcnt = 2;
+	int keepintvl = 2;
 	setsockopt(listen_fd, IPPROTO_TCP, TCP_KEEPIDLE, (void*)&keepidle, sizeof(keepidle));
 	setsockopt(listen_fd, IPPROTO_TCP, TCP_KEEPCNT, (void*)&keepcnt, sizeof(keepcnt));
 	setsockopt(listen_fd, IPPROTO_TCP, TCP_KEEPINTVL, (void*)&keepintvl, sizeof(keepcnt));
@@ -136,6 +136,48 @@ int select_socket_block(int Sock, int IsRead)
 
 out:
 	return ret;
+}
+
+int socket_recv_timeout(int Sock, char *Buf, int Len, int sec)
+{
+	int Offset = 0;
+	int RecvSize = 0;
+	int Count = 0;
+	int FreeSize = 0;
+
+	int ret = 0;
+
+	do {
+		ret = select_socket(Sock, 1, sec, 0);
+		if (ret < 0)
+			break;
+		else if (ret == 0) {
+				printf("time out return\n");
+			break;
+		}
+		FreeSize = Len - Offset;
+		RecvSize = FreeSize > 1024 ? 1024 : FreeSize;
+
+		do {
+			ret = recv(Sock, &Buf[Offset], RecvSize, 0);
+			if (ret == 0) {
+				printf("offset = %d\n", Offset);
+				perror("recv");
+				return Offset;
+			}
+			if (ret > 0)
+				Offset += ret;
+
+		} while (ret == -1 && errno == EINTR);
+
+		if (ret < 0) {
+			perror("recv");
+			break;
+		}
+
+	} while (Offset != Len);
+
+	return Offset;
 }
 
 int socket_recv(int Sock, char *Buf, int Len)
@@ -245,9 +287,9 @@ int socket_send_timeout(int Sock, char *Buf, int Len)
 		else if (ret == 0) {
 			count ++;
 			usleep(100);
-			if (count % 100 == 0)
+			if (count % 50 == 0)
 				printf("i am in select send while\n");
-			if (count == 1000)
+			if (count == 100)
 				return 0;			//time out
 			continue;
 		}

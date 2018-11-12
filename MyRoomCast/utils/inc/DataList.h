@@ -7,7 +7,7 @@
 #include "BaseMessage.h"
 #include "ArrayPool.h"
 
-//#define  PCM_SIZE		1152*4	  // adapt to encode 4 mp2			  
+//#define  PCM_SIZE		1152*4	  // adapt to encode  mp2			  
 
 //#define  PCM_SIZE	3528  // 20MS 44100 16 2
 
@@ -94,7 +94,7 @@ public:
 		if (p == NULL) {
 			//			cout << "error: pool is full\n";
 			pthread_mutex_unlock(&mutex);
-			return -1;
+			return -2;
 		}
 		memcpy(p->data_buf, buf, sizeof(p->data_buf));
 		//		cout << "now.sec=" << now.sec << " now.usec=" << now.usec << "\n";
@@ -115,7 +115,7 @@ public:
 		if (_p == NULL) {
 			cout << "error: pool is full\n";
 			pthread_mutex_unlock(&mutex);
-			return -1;
+			return -2;
 		}
 		//		cout << "p.sec=" << p->time_stamp.sec << " p.usec=" << p->time_stamp.usec << "\n";
 		memcpy(_p, p, sizeof(T));
@@ -131,15 +131,15 @@ public:
 		pthread_mutex_lock(&mutex);
 		T *_p = pool.malloc();
 		if (_p == NULL) {
-/*			cout << "writeToTail : pool is full, erase first\n";
+/*			cout << "writeToTail : pool is full, erase first\n"; */
 			_p = data_list.front();
 			data_list.pop_front();
 			pool.free(_p);
-			_p = pool.malloc();	*/
-			cout << "writeToTail : pool is full, erase all\n";
+			_p = pool.malloc();	
+/*			cout << "writeToTail : pool is full, erase all\n";
 			data_list.clear();
 			pool.reinit(count);
-			_p = pool.malloc();
+			_p = pool.malloc();*/
 		}
 		//		cout << "p.sec=" << p->time_stamp.sec << " p.usec=" << p->time_stamp.usec << "\n";
 		memcpy(_p, p, sizeof(T));

@@ -46,7 +46,7 @@ int OssPlayer::init()
 	{
 		printf("Cannot set buffer size\n");
 		return 1;
-	}
+	}	
 	int arg;
 	arg = format;
 	if (ioctl(dsp_fd, SNDCTL_DSP_SETFMT, &arg) == -1)//设置量化位数

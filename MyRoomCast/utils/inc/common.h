@@ -89,6 +89,8 @@ int initTcpSocket();
 
 int socket_recv(int Sock, char *Buf, int Len);
 
+int socket_recv_timeout(int Sock, char *Buf, int Len, int sec);
+
 int socket_send(int Sock, char *Buf, int Len);
 
 int socket_send_timeout(int Sock, char *Buf, int Len);

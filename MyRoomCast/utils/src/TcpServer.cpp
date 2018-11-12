@@ -5,8 +5,10 @@
 #include "DataMessage.h"
 #include "fifo_data.h"
 #include "DataList.h"
+#include "Queue.h"
 
 const char *play_list[] = {
+	"http://m3u8.radio1964.com/m3u/120/merge.m3u8",
 	"http://music.163.com/song/media/outer/url?id=436514312.mp3",
 	"http://music.163.com/song/media/outer/url?id=574566207.mp3",
 	"http://music.163.com/song/media/outer/url?id=138306.mp3",
@@ -25,13 +27,9 @@ const char *play_list[] = {
 	"http://od.open.qingting.fm/m4a/59a6ba297cb8914779245b2e_7858040_64.m4a?u=758&channelId=177004&programId=7686110/?deviceid=1c88792002da",
 	"http://fdfs.xmcdn.com/group3/M09/5B/3E/wKgDsVNYzxfDQrVWAGY8CUVCAwU357.mp3",
 	"http://airsmart-photo1.oss-cn-shanghai.aliyuncs.com/m11.mp3",
-
-
 	"end",
 };
 
-
-static pthread_mutex_t mutex;
 
 Mp2_Codec TcpServer::mp2_handler;
 FlacEncode TcpServer::flacEncode;
@@ -42,15 +40,15 @@ static int write_list_thd_running = 0;
 static int play_thd_running = 0;
 static int send_thd_running = 0;
 static int accept_thd_running = 0;
+static int write_queue_thd_running = 0;
 
-int TcpServer::client[FD_SETSIZE];
+Socket_Mutex TcpServer::client[FD_SETSIZE];
 
 TcpServer::TcpServer(char *ip, short port)
 {
 	memset(server_ip, 0, sizeof(server_ip));
 	if (ip)
 		memcpy(server_ip, ip, sizeof(server_ip) - 1);
-	pthread_mutex_init(&mutex, NULL);
 	server_port = port;
 	server_socket = 0;
 	//	TcpServer::mp2_handler.encode_init(44100, 256000, 2);
@@ -58,6 +56,10 @@ TcpServer::TcpServer(char *ip, short port)
 	TcpServer::flacEncode.encoderInit(44100, 16, 2);
 	pcm_chan_em = UNKNOW;
 	protocol_em = MP2_DATA;
+	for (int i = 0; i < FD_SETSIZE; i++) {
+		client[i].socket = -1;
+		pthread_mutex_init(&client[i].mutex, NULL);
+	}
 }
 
 TcpServer::~TcpServer()
@@ -174,25 +176,28 @@ int TcpServer::stopServer()
 	shutdown(server_socket, SHUT_RDWR);
 	close(server_socket);
 	write_list_thd_running = 0;
+	write_queue_thd_running = 0;
 	play_thd_running = 0;
 	send_thd_running = 0;
 	accept_thd_running = 0;
 	sleep(1);
 	for (int i = 0; i < FD_SETSIZE; i++) {
-		client_sk = client[i];
+		pthread_mutex_lock(&client[i].mutex);
+		client_sk = client[i].socket;
 		if (client_sk > 0)
 		{
-			printf("block here\n");
-			pthread_mutex_lock(&mutex);
+			printf("block here\n");	
 			shutdown(client_sk, SHUT_RDWR);
 			close(client_sk);
-			client[i] = 0;
-			pthread_mutex_unlock(&mutex);
+			client[i].socket = 0;	
 		}
+		pthread_mutex_unlock(&client[i].mutex);
 	}
 	DataList<PcmChunk>::instance()->reInit();
 	DataList<Mp2Chunk>::instance()->reInit();
 	DataList<FlacChunk>::instance()->reInit();
+	Queue<FlacChunk>::instance()->reInit();
+	Queue<Mp2Chunk>::instance()->reInit();
 }
 
 int TcpServer::cleanSocketBuffer(int fd)
@@ -309,7 +314,7 @@ void * TcpServer::writeListThread(void * tcp_server_)
 		else if (rt == 0) {
 			printf("read pipe error rt == 0\n");
 			read_zero_count++;
-			if (read_zero_count == 20) {
+			if (read_zero_count == 30) {
 				read_zero_count = 0;
 				static int count = 0;
 				const char *play_content = *(play_list + count);
@@ -350,7 +355,7 @@ void * TcpServer::writeListThread(void * tcp_server_)
 			flacChunk->time_stamp = tv(timeval_);
 			tv::addUs(timeval_, flac_duaration + server_delay);
 			if (flacChunk->data_size)														
-				DataList<FlacChunk>::instance()->writeToTail(flacChunk);			//if List is full  clear all, put it to tail
+				DataList<FlacChunk>::instance()->writeToTail(flacChunk);			//if List is full  clear first, put it to tail
 			flacChunk->data_size = 0;
 			read_len = 0;
 			if (DataList<PcmChunk>::instance()->getSize() >= CACHE_MS / 13 * 2 - 50) {
@@ -453,7 +458,7 @@ void *TcpServer::acceptThread(void *tcp_server)
 	memset(client, 0, FD_SETSIZE);
 	printf("start accept thread\n");
 	int client_sk;
-	pthread_t thd, thd_write, thd_send, thd_play;
+	pthread_t thd, thd_write_list, thd_write_queue, thd_send, thd_play, thd_each_send;
 	struct sockaddr_in client_addr;
 	socklen_t addr_len = sizeof(struct sockaddr_in);
 
@@ -465,18 +470,33 @@ void *TcpServer::acceptThread(void *tcp_server)
 			fprintf(stderr, "[%s:%d]%s::accept(): %s\n", __FILE__, __LINE__, __FUNCTION__, strerror(errno));
 			return NULL;
 		}
-		client[client_sk] = client_sk;
+		pthread_mutex_lock(&client[client_sk].mutex);
+		client[client_sk].socket = client_sk;
+		pthread_mutex_unlock(&client[client_sk].mutex);
 		pthread_create(&thd, NULL, processThread, (void *)client_sk);
+	
+
 		if (!write_list_thd_running) {
 			write_list_thd_running = 1;
-			pthread_create(&thd_write, NULL, writeListThread, tcp_server);
+			pthread_create(&thd_write_list, NULL, writeListThread, tcp_server);
 
 		}
-		if (!send_thd_running) {
+/*		if (!send_thd_running) {
 			send_thd_running = 1;
 			pthread_create(&thd_send, NULL, sendThread, tcp_server);
 
+		}*/
+		if (!write_queue_thd_running) {
+			write_queue_thd_running = 1;
+			pthread_create(&thd_write_queue, NULL, writeQueueThread, tcp_server);
+
 		}
+
+		unsigned char *buf = (unsigned char *)malloc(sizeof(TcpServer *) + sizeof(int));
+		memcpy(buf, &tcp_server, sizeof(TcpServer *));
+		memcpy(buf + sizeof(TcpServer *), &client_sk, sizeof(client_sk));
+		pthread_create(&thd_each_send, NULL, eachSendThread, (void *)buf);
+
 		if (!play_thd_running) {
 			play_thd_running = 1;
 			pthread_create(&thd_play, NULL, playThread, tcp_server);
@@ -499,7 +519,8 @@ void *TcpServer::processThread(void *c_sk)
 	int rt = 0;
 	printf("before recv client sk = %d\n", client_sk);
 	while (1) {
-		rt = socket_recv(client_sk, (char *)buf, expect_len);
+//		rt = socket_recv(client_sk, (char *)buf, expect_len);
+		rt = socket_recv_timeout(client_sk, (char *)buf, expect_len, 10);  //10 sec
 		if (rt <= 0 || errno == ECONNRESET || rt != expect_len) {
 			cout << "recv base msg head error rt=" << rt << endl;
 			goto SOCKET_ERR;
@@ -524,20 +545,20 @@ void *TcpServer::processThread(void *c_sk)
 			}
 			timeMsg.latency = timeMsg.head.received - timeMsg.head.sent;
 			tv t1;
-			timeMsg.head.sent = t;
+			timeMsg.head.sent = t1;
 			send_len = timeMsg.serialize(buf);
 			if (timeMsg.head.magic != MAGIC) {
 				printf("is error Magic\n");
 				goto Error_Msg;
 			}
-			pthread_mutex_lock(&mutex);
+			pthread_mutex_lock(&client[client_sk].mutex);
 			rt = socket_send(client_sk, (char *)buf, send_len);
 			if (rt != send_len) {
 				perror("send timemsg\n");
-				pthread_mutex_unlock(&mutex);
+				pthread_mutex_unlock(&client[client_sk].mutex);
 				goto SOCKET_ERR;
 			}
-			pthread_mutex_unlock(&mutex);
+			pthread_mutex_unlock(&client[client_sk].mutex);
 			break;
 		}
 		case DATA:
@@ -552,23 +573,23 @@ void *TcpServer::processThread(void *c_sk)
 
 Error_Msg:
 	printf("error packet, close the connect\n");
-	pthread_mutex_lock(&mutex);
+	pthread_mutex_lock(&client[client_sk].mutex);
 	close(client_sk);
-	client[client_sk] = 0;
-	pthread_mutex_unlock(&mutex);
+	client[client_sk].socket = 0;
+	pthread_mutex_unlock(&client[client_sk].mutex);
 	return NULL;
 SOCKET_ERR:
 	printf("rt = %d, errno = %d\n", rt, errno);
 	perror("recv");
-	pthread_mutex_lock(&mutex);
+	pthread_mutex_lock(&client[client_sk].mutex);
 	close(client_sk);
-	client[client_sk] = 0;
-	pthread_mutex_unlock(&mutex);
+	client[client_sk].socket = 0;
+	pthread_mutex_unlock(&client[client_sk].mutex);
 	return NULL;
 }
 
 
-void * TcpServer::sendThread(void *tcp_server_)
+/*void * TcpServer::sendThread(void *tcp_server_)
 {
 	THREAD_DETACH;
 	DataMessage *dataMsg = new DataMessage;
@@ -621,7 +642,7 @@ void * TcpServer::sendThread(void *tcp_server_)
 			tv now;
 			if ((now - dataMsg->flac_chunk.time_stamp).getUs() / MS > CACHE_MS - send_old_count)
 			{
-//				cout << " flac_chunk is old time=" << (now - dataMsg->flac_chunk.time_stamp).getUs() / MS << endl;
+				cout << " flac_chunk is old time=" << (now - dataMsg->flac_chunk.time_stamp).getUs() / MS << endl;
 				if(send_old_count < CACHE_MS)
 					send_old_count += 100;
 				continue;
@@ -639,7 +660,7 @@ void * TcpServer::sendThread(void *tcp_server_)
 
 		}
 
-		if (tag++ % 500 == 0)
+		if (tag++ % 200 == 0)
 		{
 			printf("sendlen = %d, sizeof(msghead)=%d\n", sendlen, sizeof(Msg_Head));
 		}
@@ -667,7 +688,174 @@ void * TcpServer::sendThread(void *tcp_server_)
 	free(buf);
 	delete dataMsg;
 	send_thd_running = 0;
+}	*/
+
+
+void * TcpServer::writeQueueThread(void *tcp_server_)
+{
+	THREAD_DETACH;
+	TcpServer *tcp_server = (TcpServer *)tcp_server_;
+	int protocol = tcp_server->getProtocol();
+	int rt = 0;
+	Mp2Chunk mp2_chunk;
+	FlacChunk flac_chunk;
+	cout << "protocol=" << protocol << endl;
+	int count = 1;
+	while (write_queue_thd_running) {
+		if (protocol == MP2_DATA) {
+			rt = DataList<Mp2Chunk>::instance()->read(&mp2_chunk);
+			if (rt == -1) {
+				usleep(1 * MS);
+				if (count++ % 1000 == 0) {
+					cout << "can't get data from list after 1s long\n";
+				}
+				continue;
+			}
+			count = 1;
+			while (write_queue_thd_running) {
+				rt = Queue<Mp2Chunk>::instance()->write(&mp2_chunk);
+				if (rt == -1) {
+					usleep(1 * MS);
+					continue;
+				}
+				break;
+			}
+		}
+		else if (protocol == FLAC_DATA) {
+			rt = DataList<FlacChunk>::instance()->read(&flac_chunk);
+			if (rt == -1) {
+				usleep(1 * MS);
+				continue;
+			}
+			while (write_queue_thd_running) {
+				rt = Queue<FlacChunk>::instance()->write(&flac_chunk);
+				if (rt == -1) {
+					usleep(1 * MS);
+					continue;
+				}
+				break;
+			}
+		}
+		usleep(1 * MS);
+	}
+	return NULL;
 }
+
+void * TcpServer::eachSendThread(void *cache)
+{
+	THREAD_DETACH;
+	TcpServer *tcp_server = *(TcpServer **)cache;
+	int protocol = tcp_server->getProtocol();
+
+	int client_sk = *(int *)((char *)cache + sizeof(TcpServer *));
+	free(cache);
+	cout << "client_sk=" << client_sk << " send thread start\n";
+	int rt = 0;
+	int tag = 0;
+	int send_old_count = 0;
+	int sendlen = 0;
+	DataMessage *dataMsg = new DataMessage;
+	unsigned char *buf = (unsigned char *)malloc(8192);
+	if (buf == NULL) {
+		perror("malloc");
+		delete dataMsg;
+		return NULL;
+	}
+
+	while (1) {	
+		pthread_mutex_lock(&client[client_sk].mutex);
+		if (client[client_sk].socket <= 0) {
+			pthread_mutex_unlock(&client[client_sk].mutex);
+			break;
+		}
+		pthread_mutex_unlock(&client[client_sk].mutex);
+		if (protocol == MP2_DATA) {
+			rt = Queue<Mp2Chunk>::instance()->read(client_sk, &dataMsg->mp2_chunk);
+			if (rt == -1) {
+				usleep(1 * MS);
+				continue;
+			}
+			tv now;
+			if ((now - dataMsg->mp2_chunk.time_stamp).getUs() / MS > CACHE_MS - send_old_count)
+			{
+				if(tag%100 == 0)
+					cout << " mp2_chunk is old time=" << (now - dataMsg->mp2_chunk.time_stamp).getUs() / MS << endl;
+				if (send_old_count < CACHE_MS)
+					send_old_count += 100;
+				usleep(10 * MS);
+				continue;
+			}
+			else {
+				if (send_old_count > 0)
+					send_old_count -= 100;
+			}
+			dataMsg->data_info.type = MP2_DATA;
+			//			cout << "flac_chunk data_size=" << dataMsg->flac_chunk.data_size << endl;
+			dataMsg->data_info.data_size = dataMsg->mp2_chunk.data_size;
+			dataMsg->data_info.time_stamp = dataMsg->mp2_chunk.time_stamp;
+			dataMsg->payload = (char *)dataMsg->mp2_chunk.data_buf;
+			sendlen = dataMsg->serialize(buf);
+		}
+		else if (protocol == FLAC_DATA) {
+			rt = Queue<FlacChunk>::instance()->read(client_sk, &dataMsg->flac_chunk);
+			if (rt == -1) {
+				usleep(1 * MS);
+				continue;
+			}
+			tv now;
+			if ((now - dataMsg->flac_chunk.time_stamp).getUs() / MS > CACHE_MS - send_old_count)
+			{
+				if (tag % 100 == 0)
+					cout << " flac_chunk is old time=" << (now - dataMsg->flac_chunk.time_stamp).getUs() / MS << endl;
+				if (send_old_count < CACHE_MS)
+					send_old_count += 100;
+				continue;
+			}
+			else {
+				if (send_old_count > 0)
+					send_old_count -= 100;
+			}
+			dataMsg->data_info.type = FLAC_DATA;
+			//			cout << "flac_chunk data_size=" << dataMsg->flac_chunk.data_size << endl;
+			dataMsg->data_info.data_size = dataMsg->flac_chunk.data_size;
+			dataMsg->data_info.time_stamp = dataMsg->flac_chunk.time_stamp;
+			dataMsg->payload = (char *)dataMsg->flac_chunk.data_buf;
+			sendlen = dataMsg->serialize(buf);
+		}
+
+		if (tag++ % 400 == 0)
+		{
+			printf("sendlen = %d, sizeof(msghead)=%d\n", sendlen, sizeof(Msg_Head));
+		}
+
+		pthread_mutex_lock(&client[client_sk].mutex);
+		if (protocol == MP2_DATA) {
+			rt = socket_send_timeout(client_sk, (char *)buf, sendlen);
+		}
+		else {
+			rt = socket_send(client_sk, (char *)buf, sendlen);
+		}
+		if (rt != sendlen && rt != 0) {
+			close(client_sk);
+			client[client_sk].socket = 0;
+			printf("send data msg error, rt=%d sendlen=%d\n", rt, sendlen);
+			pthread_mutex_unlock(&client[client_sk].mutex);
+			break;
+		}
+		pthread_mutex_unlock(&client[client_sk].mutex);
+	}
+	cout << "jump out from client " << client_sk << " send thread" << endl;
+	if (protocol == MP2_DATA) {
+		Queue<Mp2Chunk>::instance()->removeVisitor(client_sk);
+	}
+	else {
+		Queue<FlacChunk>::instance()->removeVisitor(client_sk);
+	}
+	free(buf);
+	delete dataMsg;
+	return NULL;
+}
+
 
 void * TcpServer::playThread(void *tcp_server_)
 {
@@ -754,4 +942,5 @@ void * TcpServer::playThread(void *tcp_server_)
 	free(pcm_chunk);
 	delete player;
 	play_thd_running = 0;
+	return NULL;
 }

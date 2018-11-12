@@ -31,10 +31,15 @@ typedef enum{
 
 */
 
+typedef struct socket_mutex {
+	int socket;
+	pthread_mutex_t mutex;
+}Socket_Mutex;
+
 class TcpServer
 {
 public:
-	static int client[FD_SETSIZE];
+	static Socket_Mutex client[FD_SETSIZE];
 	static Mp2_Codec mp2_handler;
 	static FlacEncode flacEncode;
 private:
@@ -58,7 +63,9 @@ protected: // thread about
 	static	void * writeListThread(void * tcp_server) ;	
 	static	void * acceptThread(void * tcp_server) ;
 	static	void * processThread(void * client_sk) ;
-	static  void * sendThread(void *tcp_server);
+//	static  void * sendThread(void *tcp_server);
+	static  void * writeQueueThread(void *p);
+	static  void * eachSendThread(void *client_sk);
 	static  void * playThread(void *tcp_server);
 private:
 	int myBindAndListen(int listen_queue_size);
